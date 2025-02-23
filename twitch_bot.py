@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import logging.config
+import socket
 import urllib
 import urllib.parse
 from typing import Any
@@ -139,7 +140,7 @@ async def startWebSocketClient(
 REDIRECTION_SCRIPT = b"<script>location.href = location.href.replace('#', '?')</script>"
 
 
-async def get_access_token(config: Config):
+def get_access_token(config: Config):
     data = dict(
         response_type="token",
         client_id=CLIENT_ID,
@@ -150,57 +151,37 @@ async def get_access_token(config: Config):
     auth_url = f"https://id.twitch.tv/oauth2/authorize?{query}"
     print(f"Authorize via following url: http://localhost:3000/auth")
 
-    stop_server = asyncio.Event()
+    server = socket.create_server(("0.0.0.0", 3000))
+    while True:
+        conn, _ = server.accept()
+        request = conn.recv(1 << 20).split(b"\r\n")[0]
 
-    async def http_connection_handler(
-        reader: asyncio.StreamReader,
-        writer: asyncio.StreamWriter,
-    ):
-        async def write(data: bytes):
-            writer.write(data)
-            await writer.drain()
-            writer.close()
-            await writer.wait_closed()
-
-        request = await reader.readline()
         if not request.startswith(b"GET"):
             logger.debug(f"Bad request: {request=}")
-            await write(b"HTTP/1.1 400 Bad request\r\n\r\n")
-            return
+            conn.sendall(b"HTTP/1.1 400 Bad request\r\n\r\n")
+            continue
 
         requested_url = request.split()[1].decode("utf-8")
         logger.debug(f"route {requested_url}")
 
         if requested_url == "/":
-            await write(b"HTTP/1.1 200 OK\r\n\r\n" + REDIRECTION_SCRIPT)
-            return
+            conn.sendall(b"HTTP/1.1 200 OK\r\n\r\n" + REDIRECTION_SCRIPT)
+            continue
 
         if requested_url == "/auth":
             location = f"Location: {auth_url}".encode("utf-8")
-            await write(b"HTTP/1.1 303 See Other\r\n" + location + b"\r\n\r\n")
-            return
+            conn.sendall(b"HTTP/1.1 303 See Other\r\n" + location + b"\r\n\r\n")
+            continue
 
         if "access_token" in requested_url:
             parts = urllib.parse.urlparse(requested_url)
             query = urllib.parse.parse_qs(parts.query)
             config.access_token = query["access_token"][0]
             logger.debug("access_token is set")
-            await write(b"HTTP/1.1 200 OK\r\n\r\nDONE")
-            stop_server.set()
-            return
+            conn.sendall(b"HTTP/1.1 200 OK\r\n\r\nDONE")
+            break
 
-        await write(b"HTTP/1.1 404 Not found\r\n\r\n")
-
-    server = await asyncio.start_server(
-        http_connection_handler,
-        "localhost",
-        3000,
-        start_serving=False,
-    )
-    server_task = asyncio.create_task(server.serve_forever())
-    await stop_server.wait()
-    server_task.cancel()
-    logger.debug("server closed")
+        conn.sendall(b"HTTP/1.1 404 Not found\r\n\r\n")
 
 
 async def main():
@@ -233,7 +214,7 @@ async def main():
     )
     config = Config()
 
-    await get_access_token(config)
+    get_access_token(config)
     validate(config)
     get_user_id(config)
     await startWebSocketClient(config)
